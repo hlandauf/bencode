@@ -67,13 +67,28 @@ func EncodeBytes(val interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// Marshaler is the interface implemented by objects that can marshal
+// themselves into valid bencoded data.
+type Marshaler interface {
+	MarshalBencode() ([]byte, error)
+}
+
+type EmptyMarshaler interface {
+	IsEmptyBencode() bool
+}
+
 func encodeValue(w io.Writer, val reflect.Value) error {
 	//inspect the val to check
 	v := indirect(val)
 
 	//send in a raw message if we have that type
-	if rm, ok := v.Interface().(RawMessage); ok {
-		_, err := io.Copy(w, bytes.NewReader(rm))
+	if rm, ok := v.Interface().(Marshaler); ok {
+		b, err := rm.MarshalBencode()
+		if err != nil {
+			return err
+		}
+
+		_, err = io.Copy(w, bytes.NewReader(b))
 		return err
 	}
 

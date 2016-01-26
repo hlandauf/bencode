@@ -72,5 +72,6 @@ func isEmptyValue(v reflect.Value) bool {
 		return v.IsNil()
 	}
 
-	return false
+	m, ok := indirect(v).Interface().(EmptyMarshaler)
+	return ok && m.IsEmptyBencode()
 }

@@ -135,12 +135,24 @@ func indirect(v reflect.Value) reflect.Value {
 	return v
 }
 
+// Unmarshaler is the interface implemented by objects that can unmarshal a
+// JSON description of themselves. The input can be assumed to be a valid
+// bencoded value. UnmarshalBencode must copy the data if it wishes to retain
+// the data after returning.
+type Unmarshaler interface {
+	UnmarshalBencode([]byte) error
+}
+
 func (d *Decoder) decodeInto(val reflect.Value) (err error) {
 	v := indirect(val)
 
 	//if we're decoding into a RawMessage set raw to true for the rest of
 	//the call stack, and switch out the value with an interface{}.
-	if _, ok := v.Interface().(RawMessage); ok && !d.raw {
+	unm, ok := v.Interface().(Unmarshaler)
+	if !ok {
+		unm, ok = v.Addr().Interface().(Unmarshaler)
+	}
+	if ok && !d.raw {
 		var x interface{}
 		v = reflect.ValueOf(&x).Elem()
 
@@ -150,8 +162,13 @@ func (d *Decoder) decodeInto(val reflect.Value) (err error) {
 		d.raw = true
 		defer func() {
 			d.raw = false
-			v := indirect(val)
-			v.SetBytes(append([]byte(nil), d.buf...))
+
+			if err == nil {
+				err = unm.UnmarshalBencode(append([]byte(nil), d.buf...))
+			}
+
+			//v := indirect(val)
+			//v.SetBytes(append([]byte(nil), d.buf...))
 		}()
 	}
 
@@ -347,21 +364,23 @@ func (d *Decoder) decodeDict(v reflect.Value) error {
 		isMap   bool
 	)
 
-	switch v.Kind() {
-	case reflect.Map:
-		t := v.Type()
-		if t.Key() != reflectStringType {
+	if !d.raw {
+		switch v.Kind() {
+		case reflect.Map:
+			t := v.Type()
+			if t.Key() != reflectStringType {
+				return fmt.Errorf("Can't store a map[string]interface{} into %s", v.Type())
+			}
+			if v.IsNil() {
+				v.Set(reflect.MakeMap(t))
+			}
+
+			isMap = true
+			mapElem = reflect.New(t.Elem()).Elem()
+		case reflect.Struct:
+		default:
 			return fmt.Errorf("Can't store a map[string]interface{} into %s", v.Type())
 		}
-		if v.IsNil() {
-			v.Set(reflect.MakeMap(t))
-		}
-
-		isMap = true
-		mapElem = reflect.New(t.Elem()).Elem()
-	case reflect.Struct:
-	default:
-		return fmt.Errorf("Can't store a map[string]interface{} into %s", v.Type())
 	}
 
 	for {
@@ -383,40 +402,42 @@ func (d *Decoder) decodeDict(v reflect.Value) error {
 			return err
 		}
 
-		if isMap {
-			mapElem.Set(reflect.Zero(v.Type().Elem()))
-			subv = mapElem
-		} else {
-			var ok bool
-			t := v.Type()
-			if isValidTag(key) {
-				for i := 0; i < v.NumField(); i++ {
-					f = t.Field(i)
-					tagName, _ := parseTag(f.Tag.Get("bencode"))
-					if tagName == key && tagName != "-" {
-						// If we have found a matching tag
-						// that isn't '-'
-						ok = true
-						break
+		if !d.raw {
+			if isMap {
+				mapElem.Set(reflect.Zero(v.Type().Elem()))
+				subv = mapElem
+			} else {
+				var ok bool
+				t := v.Type()
+				if isValidTag(key) {
+					for i := 0; i < v.NumField(); i++ {
+						f = t.Field(i)
+						tagName, _ := parseTag(f.Tag.Get("bencode"))
+						if tagName == key && tagName != "-" {
+							// If we have found a matching tag
+							// that isn't '-'
+							ok = true
+							break
+						}
 					}
 				}
-			}
-			if !ok {
-				f, ok = t.FieldByName(key)
-			}
-			if !ok {
-				f, ok = t.FieldByNameFunc(matchName(key))
-			}
-
-			if ok {
-				if f.PkgPath != "" {
-					return fmt.Errorf("Can't store into unexported field: %s", f)
+				if !ok {
+					f, ok = t.FieldByName(key)
 				}
-				subv = v.FieldByIndex(f.Index)
+				if !ok {
+					f, ok = t.FieldByNameFunc(matchName(key))
+				}
+
+				if ok {
+					if f.PkgPath != "" {
+						return fmt.Errorf("Can't store into unexported field: %s", f)
+					}
+					subv = v.FieldByIndex(f.Index)
+				}
 			}
 		}
 
-		if !subv.IsValid() {
+		if d.raw || !subv.IsValid() {
 			//if it's invalid, grab but ignore the next value
 			var x interface{}
 			err := d.decodeInto(reflect.ValueOf(&x).Elem())
